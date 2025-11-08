@@ -3,8 +3,8 @@ using CsvHelper;
 using CsvHelper.Configuration;
 
 public static class ToxicCommentsParser {
-	public static (string message, string typeOfToxicity)[] ParseCsv(string path) {
-		var results = new List<(string, string)>();
+	public static (string message, int[] typesOfToxicity)[] ParseCsv(string path) {
+		var results = new List<(string, int[])>();
 
 		var config = new CsvConfiguration(CultureInfo.InvariantCulture) {
 			HasHeaderRecord = true,
@@ -18,30 +18,31 @@ public static class ToxicCommentsParser {
 
 		using (var reader = new StreamReader(path))
 		using (var csv = new CsvReader(reader, config)) {
+			csv.Read();
 			while (csv.Read())
 				try {
-					string comment = csv.GetField("comment_text");
-					int toxic = csv.GetField<int>("toxic");
-					int severe = csv.GetField<int>("severe_toxic");
-					int obscene = csv.GetField<int>("obscene");
-					int threat = csv.GetField<int>("threat");
-					int insult = csv.GetField<int>("insult");
-					int identityHate = csv.GetField<int>("identity_hate");
+					string comment = csv.GetField<string>(1) ?? string.Empty;
+					int toxic = csv.GetField<int>(2);
+					int severe = csv.GetField<int>(3);
+					int obscene = csv.GetField<int>(4);
+					int threat = csv.GetField<int>(5);
+					int insult = csv.GetField<int>(6);
+					int identityHate = csv.GetField<int>(7);
 
-					var type =
-						toxic == 1 ? "toxic" :
-						severe == 1 ? "severe_toxic" :
-						obscene == 1 ? "obscene" :
-						threat == 1 ? "threat" :
-						insult == 1 ? "insult" :
-						identityHate == 1 ? "identity_hate" :
-						"none";
-
-					results.Add((comment, type));
-				} catch { /* skip bad rows */
+					var toxicityTypes = new List<int>();
+					
+					if(toxic != 0) toxicityTypes.Add(0); 
+					if(severe != 0) toxicityTypes.Add(1); 
+					if(obscene != 0) toxicityTypes.Add(2); 
+					if(threat != 0) toxicityTypes.Add(3); 
+					if(insult != 0) toxicityTypes.Add(4); 
+					if(identityHate != 0) toxicityTypes.Add(5); 
+					
+					results.Add((comment, toxicityTypes.ToArray())!);
+				} catch(Exception e) {
+					throw e;
 				}
 		}
-
 		return results.ToArray();
 	}
 }
