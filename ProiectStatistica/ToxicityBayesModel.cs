@@ -3,38 +3,57 @@
 namespace ProiectStatistica;
 
 public class ToxicityBayesModel {
-	public static readonly string[] ToxicityLabels = ["Toxic", "Severe", "Obscene", "Threat", "Insult", "Identity hate"];
-	private readonly Dictionary<string, int>[] toxicWordAppearances = new Dictionary<string, int>[ToxicityLabels.Length];
-	private readonly Dictionary<string, int>[] nonToxicWordAppearances = new Dictionary<string, int>[ToxicityLabels.Length];
-	private readonly int[] totalToxicWordsSum = new int[6];
-	private readonly int[] totalNonToxicWordsSum = new int[6];
+	public readonly string[] toxicityLabels;
+	private readonly Dictionary<string, int>[] toxicWordAppearances;
+	private readonly Dictionary<string, int>[] nonToxicWordAppearances;
+	private readonly int[] totalToxicWordsSum;    // Numarul total de cuvinte in mesaje toxice 
+	private readonly int[] totalNonToxicWordsSum; // Numarul total de cuvinte in mesaje care nu au un anumit tip de toxicitate
+	private int neutralWordsSum = 0;
 	
 	private readonly Dictionary<string, int> neutralWordAppearances = new();
-	private int neutralWordsSum = 0;
-	private readonly Dictionary<string, int> totalWordAppearances = new();
+	private readonly Dictionary<string, int> totalWordAppearances = new(); 
 
-	private double[] toxicityProbabilities = new double[ToxicityLabels.Length];
-	private double neutralProbability = 0;
+	// Probabilitati a priori
+	private readonly double[] toxicityProbabilities; 
+	private double neutralProbability = 0; 
 
 	private readonly HashSet<string> ignoredWords = [];
 
+	// Daca sa consideram si grupari de genul "cuv1 cuv2" intr-un singur token
 	private readonly bool useBigrams;
 	
-	public ToxicityBayesModel(string path, bool useBigrams = true) {
+	public ToxicityBayesModel(string path, bool useBigrams = true, double trainPercentage = 1.0d) {
 		this.useBigrams = useBigrams;
 
 
 		Console.ForegroundColor = ConsoleColor.DarkGray;
 		Console.WriteLine("Reading and parsing data...");
 		
-		var data = ToxicCommentsParser.ParseCsv(path);
-		data = data[..150_000];
+		var allData = DatasetParser.ParseCsv(path);
+		var data = allData.rows;
+		int trainingLimit = (int) Math.Floor(data.Length * Math.Clamp(trainPercentage, 0.0, 1.0));
+		data = data[..trainingLimit];
 
-		Console.WriteLine($"Data has been read ({data.Length} entries), preprocessing...");
-		data = data.Select(tup => (CleanMessage(tup.message), tup.typesOfToxicity)).ToArray();
-
-		PopulateDictionaries(data);
+		toxicityLabels = allData.categoryHeaders.Select(CleanCategory).ToArray();
+		int nrCategories = toxicityLabels.Length;
+		toxicWordAppearances = new Dictionary<string, int>[nrCategories];
+		nonToxicWordAppearances = new Dictionary<string, int>[nrCategories];
+		totalToxicWordsSum = new int[nrCategories];
+		totalNonToxicWordsSum = new int[nrCategories];
+		toxicityProbabilities = new double[nrCategories];
 		
+		
+		Console.WriteLine($"Data has been read ({data.Length} entries), preprocessing...");
+		
+		Console.Write("   Cleaning input messages... ");
+		data = data.Select(tup => (CleanMessage(tup.message), tup.types)).ToArray();
+		Console.WriteLine("Done");
+
+		Console.Write("   Populating internal variables... ");
+		PopulateDictionaries(data);
+		Console.WriteLine("Done");
+
+		Console.WriteLine("   Removing rare words...");
 		RemoveRareWords(1);
 		// AddUselessWordsToIgnoredSet();
 
@@ -48,19 +67,22 @@ public class ToxicityBayesModel {
 	}
 
 	private void PopulateDictionaries((string, int[])[] data) {
-		for (int i = 0; i < ToxicityLabels.Length; i++) {
-			if (toxicWordAppearances[i] == null) toxicWordAppearances[i] = new Dictionary<string, int>(); 
-			else toxicWordAppearances[i].Clear();
+		// Resetam dictionarele
+		for (int i = 0; i < toxicityLabels.Length; i++) {
+			toxicWordAppearances[i] ??= new Dictionary<string, int>(); 
+			toxicWordAppearances[i].Clear();
 
-			if (nonToxicWordAppearances[i] == null) nonToxicWordAppearances[i] = new  Dictionary<string, int>(); 
-			else nonToxicWordAppearances[i].Clear();
+			nonToxicWordAppearances[i] ??= new  Dictionary<string, int>(); 
+			nonToxicWordAppearances[i].Clear();
 		}
 		neutralWordAppearances.Clear();
 		totalWordAppearances.Clear();
 		
+		// Iteram prin fiecare mesaj
 		foreach (var (message, types) in data) {
 			var words = message.Split(' ');
 
+			// Iteram prin fiecare cuvant
 			for (int i = 0; i < words.Length; i++) {
 				var word = words[i];
 				if(!ignoredWords.Contains(word)) AddToken(word, types);
@@ -72,7 +94,8 @@ public class ToxicityBayesModel {
 			}
 		}
 
-		for (int l = 0; l < ToxicityLabels.Length; l++) {
+		// Dupa ce au fost populate, calculam sumele (numarul total de cuvinte) pentru a calcula prioritatile posteriori cand verificam cuvinte
+		for (int l = 0; l < toxicityLabels.Length; l++) {
 			totalToxicWordsSum[l] = toxicWordAppearances[l].Values.Sum();
 			totalNonToxicWordsSum[l] = nonToxicWordAppearances[l].Values.Sum();
 		}
@@ -80,13 +103,14 @@ public class ToxicityBayesModel {
 		neutralWordsSum = neutralWordAppearances.Values.Sum();
 	}
 
+	// Adauga token in dictionarele corespunzatoare
 	private void AddToken(string token, int[] toxicityTypes) {
 		if (!totalWordAppearances.TryAdd(token, 1)) totalWordAppearances[token]++;
 
 		if (toxicityTypes.Length == 0) {
 			if (!neutralWordAppearances.TryAdd(token, 1)) neutralWordAppearances[token]++;
 		} else {
-			for (int i = 0; i < ToxicityLabels.Length; i++) {
+			for (int i = 0; i < toxicityLabels.Length; i++) {
 				if (toxicityTypes.Contains(i)) {
 					if (!toxicWordAppearances[i].TryAdd(token, 1)) toxicWordAppearances[i][token]++;
 				} else {
@@ -96,8 +120,23 @@ public class ToxicityBayesModel {
 		}
 	}
 
+	
+	// Sterge cuvinte ce apar de <= minFrequency ori
+	private void RemoveRareWords(int minFrequency = 3) {
+		var rareWords = totalWordAppearances
+		                .Where(kv => kv.Value <= minFrequency)
+		                .Select(kv => kv.Key)
+		                .ToHashSet();
+
+		foreach (var word in rareWords) ignoredWords.Add(word);
+
+		Console.WriteLine($"Removed {rareWords.Count} ({(double)rareWords.Count / totalWordAppearances.Count * 100:0.00}%) rare words (appeared <= {minFrequency} times)");
+	}
+	
+	
+	// Cauta cuvinte ce au o probabilitate foarte apropiata de a fi in multe categorii
 	private void AddUselessWordsToIgnoredSet() {
-		const double uselessnessThreshold = 0.00001; // tune this empirically
+		const double uselessnessThreshold = 0.00001;
 
 		int total = totalWordAppearances.Count;
 		int removed = 0;
@@ -106,8 +145,8 @@ public class ToxicityBayesModel {
 		foreach (var word in totalWordAppearances.Keys) {
 			if (ignoredWords.Contains(word)) continue;
 			
-			var probs = new double[ToxicityLabels.Length + 1];
-			for (var i = 0; i < ToxicityLabels.Length; i++)
+			var probs = new double[toxicityLabels.Length + 1];
+			for (var i = 0; i < toxicityLabels.Length; i++)
 				probs[i] = CalculateWordProbability(word, i, false);
 		
 			probs[^1] = (neutralWordAppearances.GetValueOrDefault(word, 0) + 1.0) / (neutralWordsSum + totalWordAppearances.Count);
@@ -124,22 +163,12 @@ public class ToxicityBayesModel {
 		
 		Console.WriteLine($"Removed {removed} useless words (purged {(double)removed / total * 100:0.00}% of words)");
 	}
-	
-	private void RemoveRareWords(int minFrequency = 3) {
-		var rareWords = totalWordAppearances
-		                .Where(kv => kv.Value <= minFrequency)
-		                .Select(kv => kv.Key)
-		                .ToHashSet();
-
-		foreach (var word in rareWords) ignoredWords.Add(word);
-
-		Console.WriteLine($"Removed {rareWords.Count} ({(double)rareWords.Count / totalWordAppearances.Count * 100:0.00}%) rare words (appeared <= {minFrequency} times)");
-	}
 
 	
+	// Updateaza probabilitatile a priori
 	private void UpdateProbabilities((string, int[])[] data) {
-		int[] categorySpecific = new int[ToxicityLabels.Length];
-		for (int i = 0; i < ToxicityLabels.Length; i++) categorySpecific[i] = 0;
+		int[] categorySpecific = new int[toxicityLabels.Length];
+		for (int i = 0; i < toxicityLabels.Length; i++) categorySpecific[i] = 0;
 
 		int totalNeutral = 0;
 		
@@ -156,33 +185,20 @@ public class ToxicityBayesModel {
 		Console.WriteLine($"Found probabilties:");
 		for (int i = 0; i < categorySpecific.Length; i++) {
 			toxicityProbabilities[i] = (double)categorySpecific[i] / data.Length;
-			Console.WriteLine($"{ToxicityLabels[i]} {toxicityProbabilities[i]*100:0.000}%");
+			Console.WriteLine($"{toxicityLabels[i]} {toxicityProbabilities[i]*100:0.000}%");
 		}
 		
 		neutralProbability = (double)totalNeutral / data.Length;
 		Console.WriteLine($"Neutral: {neutralProbability*100:0.000}%");
 		
-		// Test to see if perfectly balanced probabilities gives better results on tests, and it marginally improves tests...
+		// Test to see if perfectly balanced probabilities gives better results on tests, and it marginally improves tests :/ ...
 		// for (int i = 0; i < ToxicityLabels.Length; i++)
 		// 	toxicityProbabilities[i] = 1.0 / ToxicityLabels.Length;
 		// neutralProbability = 1.0 / (ToxicityLabels.Length + 1);
 	}
-
-	private static string CleanMessage(string input) {
-		if (string.IsNullOrWhiteSpace(input))
-			return string.Empty;
-
-		input = input.ToLowerInvariant();
-		input = Regex.Replace(input, @"[^a-z\s]", "");
-		input = Regex.Replace(input, @"\s+", " ");
-		input = input.Trim();
-
-		return input;
-	}
-
+	
 	public int[] CheckMessage(string message, bool debug=false) {
 		Console.ForegroundColor = ConsoleColor.DarkGray;
-		
 		
 		var words = CleanMessage(message).Split();
 		
@@ -193,7 +209,7 @@ public class ToxicityBayesModel {
 			logScores[l] = Math.Log(toxicityProbabilities[l]);
 			logNonScores[l] = Math.Log(1.0d - toxicityProbabilities[l]);
 			
-			if(debug) Console.WriteLine($"Current scores: {ToxicityLabels[l]} {logScores[l]:0.00} ({toxicityProbabilities[l]*100:0.00}%)   Non-{ToxicityLabels[l].ToLower()} {logNonScores[l]:0.00} ({(1.0d - toxicityProbabilities[l])*100:0.00}%)");
+			if(debug) Console.WriteLine($"Current scores: {toxicityLabels[l]} {logScores[l]:0.00} ({toxicityProbabilities[l]*100:0.00}%)   Non-{toxicityLabels[l].ToLower()} {logNonScores[l]:0.00} ({(1.0d - toxicityProbabilities[l])*100:0.00}%)");
 		}
 
 
@@ -206,9 +222,9 @@ public class ToxicityBayesModel {
 					logNonScores[l] += Math.Log(CalculateWordProbability(word, l, true));
 
 					if (debug) {
-						Console.WriteLine($"P({word}|{ToxicityLabels[l]}) = {CalculateWordProbability(word, l, false) * 100:0.00}%");
-						Console.WriteLine($"P({word}|not {ToxicityLabels[l]}) = {CalculateWordProbability(word, l, true) * 100:0.00}%");
-						Console.WriteLine($"Current scores: {ToxicityLabels[l]} {logScores[l]:0.00}   Neutral {logNonScores[l]:0.00}\n");	
+						Console.WriteLine($"P({word}|{toxicityLabels[l]}) = {CalculateWordProbability(word, l, false) * 100:0.00}%");
+						Console.WriteLine($"P({word}|not {toxicityLabels[l]}) = {CalculateWordProbability(word, l, true) * 100:0.00}%");
+						Console.WriteLine($"Current scores: {toxicityLabels[l]} {logScores[l]:0.00}   non-{toxicityLabels[l].ToLower()} {logNonScores[l]:0.00}\n");	
 					}
 				}
 			}
@@ -216,18 +232,17 @@ public class ToxicityBayesModel {
 			if (i >= words.Length - 1 || !useBigrams) continue;
 
 			word = words[i] + " " + words[i + 1];
-			
-			if (!ignoredWords.Contains(word)) {
-				for (int l = 0; l < logScores.Length; l++) {
-					logScores[l] += Math.Log(CalculateWordProbability(word, l, false));
-					logNonScores[l] += Math.Log(CalculateWordProbability(word, l, true));
 
-					if(debug) {
-						Console.WriteLine($"P({word}|{ToxicityLabels[l]}) = {CalculateWordProbability(word, l, false) * 100:0.00}%");
-						Console.WriteLine($"P({word}|not {ToxicityLabels[l]}) = {CalculateWordProbability(word, l, true) * 100:0.00}%");
-						Console.WriteLine($"Current scores: {ToxicityLabels[l]} {logScores[l]:0.00}   Neutral {logNonScores[l]:0.00}\n");
-					}
-				}
+			if (ignoredWords.Contains(word)) continue;
+			
+			for (int l = 0; l < logScores.Length; l++) {
+				logScores[l] += Math.Log(CalculateWordProbability(word, l, false));
+				logNonScores[l] += Math.Log(CalculateWordProbability(word, l, true));
+
+				if (!debug) continue;
+				Console.WriteLine($"P({word}|{toxicityLabels[l]}) = {CalculateWordProbability(word, l, false) * 100:0.00}%");
+				Console.WriteLine($"P({word}|not {toxicityLabels[l]}) = {CalculateWordProbability(word, l, true) * 100:0.00}%");
+				Console.WriteLine($"Current scores: {toxicityLabels[l]} {logScores[l]:0.00}   non-{toxicityLabels[l].ToLower()} {logNonScores[l]:0.00}\n");
 			}
 		}
 		
@@ -262,58 +277,101 @@ public class ToxicityBayesModel {
 
 		return Math.Max((wordCount + 1.0) / (total + vocabSize), 1e-6);
 	}
+	public void RunTestDataset(string path, bool useDebug = false, double testPercentage = 1.0) {
+	    Console.ForegroundColor = ConsoleColor.DarkGray;
+	    Console.WriteLine("Reading and parsing test data...");
+	    
+	    var data = DatasetParser.ParseCsv(path).rows;
+	    int trainingLimit = (int) Math.Floor(data.Length * Math.Clamp(testPercentage, 0.0, 1.0));
+	    data = data[^trainingLimit..]; // Take last trainingLimit elements
 
-	public (double neutralAccuracy, double totalAccuracy, double[] categorySpecificAccuracy) RunTestDataset(string path) {
-		Console.ForegroundColor = ConsoleColor.DarkGray;
-		Console.WriteLine("Reading and parsing data...");
-		
-		var data = ToxicCommentsParser.ParseCsv(path);
-		data = data[150_000..];
+	    Console.WriteLine("Test data has been read, preprocessing...");
+	    data = data.Select(tup => (CleanMessage(tup.message), tup.types)).ToArray();
 
-		Console.WriteLine("Data has been read, preprocessing...");
-		data = data.Select(tup => (CleanMessage(tup.message), tup.typesOfToxicity)).ToArray();
+	    Console.WriteLine($"Finished preprocessing, running {data.Length} tests...");
 
-		Console.WriteLine($"Finished preprocessing, running {data.Length} tests...");
+	    Console.ForegroundColor = ConsoleColor.DarkGray;
 
+	    int totalCategories = toxicityLabels.Length;
 
-		Console.ForegroundColor = ConsoleColor.DarkGray;
-		int total = ToxicityLabels.Length;
-		int totalCorrectGeneral = 0;
-		int totalCorrect = 0;
-		int[] categorizedCorrect = new int[total];
-		int[] categorizedTotals = new int[total];
-		for (int i = 0; i < total; i++) {
-			categorizedCorrect[i] = 0;
-			categorizedTotals[i] = 0;
-		}
-		
-		for (int i = 0; i < data.Length; i++) {
-			var res = CheckMessage(data[i].message);
-			var actual = data[i].typesOfToxicity;
+	    int totalCorrectGeneral = 0;
+	    int totalCorrect = 0;
 
-			if (res.Length > 0 && actual.Length > 0) {
-				totalCorrectGeneral++;
-			}
+	    int[] tp = new int[totalCategories]; // True positives
+	    int[] tn = new int[totalCategories]; // True negatives
+	    int[] fp = new int[totalCategories]; // False positives
+	    int[] fn = new int[totalCategories]; // False negatives
+	    int[] categorizedTotals = new int[totalCategories];
 
-			foreach (var l in actual) {
-				categorizedTotals[l]++;
+	    for (int i = 0; i < data.Length; i++) {
+	        var res = CheckMessage(data[i].message);
+	        var actual = data[i].types;
 
-				if (!res.Contains(l)) continue;
+	        if (res.Length > 0 && actual.Length > 0) totalCorrectGeneral++;
 
-				totalCorrect++;
-				categorizedCorrect[l]++;
-			}
-			
-			// Console.WriteLine($"Ran {i}/{data.Length}({(float)i / data.Length * 100:0.00}%) tests...    ({(double)totalCorrectGeneral / (i + 1)*100:0.000}%) ({(double)totalCorrect / ((i + 1) * total)*100:0.000}%) ({(double)(categorizedCorrect[0] + 1) / (categorizedTotals[0] + 1) *100:0.000}%)  ({(double)(categorizedCorrect[1] + 1) / (categorizedTotals[1] + 1)*100:0.000}%)  ({(double)(categorizedCorrect[2] + 1) / (categorizedTotals[2] + 1)*100:0.000}%)  ({(double)(categorizedCorrect[3] + 1) / (categorizedTotals[3] + 1)*100:0.000}%)  ({(double)(categorizedCorrect[4] + 1) / (categorizedTotals[4] + 1)*100:0.000}%)  ({(double)(categorizedCorrect[5] + 1) / (categorizedTotals[5] + 1)*100:0.000}%)");
-		}
-		
-		Console.ForegroundColor = ConsoleColor.Gray;
+	        for (int c = 0; c < totalCategories; c++) {
+	            bool isActual = actual.Contains(c);
+	            bool isPredicted = res.Contains(c);
 
-		var categorizedResults = new double[total];
-		for (int i = 0; i < total; i++) categorizedResults[i] = (double)(categorizedCorrect[i] + 1) / (categorizedTotals[i] + 1);
-		
-		return ((double)totalCorrectGeneral / data.Length, 
-			    (double)totalCorrect / (data.Length * total),
-			    categorizedResults);
+	            if (isActual && isPredicted) tp[c]++;
+	            else if (!isActual && !isPredicted) tn[c]++;
+	            else if (!isActual && isPredicted) fp[c]++;
+	            else if (isActual && !isPredicted) fn[c]++;
+	        }
+
+	        foreach (var l in actual) {
+	            categorizedTotals[l]++;
+	            if (res.Contains(l)) totalCorrect++;
+	        }
+
+	        if (!useDebug) continue;
+	        Console.ForegroundColor = ConsoleColor.DarkGray;
+	        Console.WriteLine($"Test text:\n  \"{data[i].message}\"\n  Result: [{string.Join(", ", res.Select(x => toxicityLabels[x]))}]");
+	        Console.WriteLine($"Expected: [{string.Join(", ", actual.Select(x => toxicityLabels[x]))}]\n");
+	    }
+
+	    Console.ForegroundColor = ConsoleColor.Gray;
+
+	    Console.WriteLine($"Neutral accuracy (any toxicity predicted correctly): {(double)totalCorrectGeneral / data.Length*100:0.00}%");
+	    Console.WriteLine($"Total accuracy (all categories individually correct): {(double)totalCorrect / (data.Length * totalCategories)*100:0.00}%");
+
+	    Console.WriteLine("\nCategory-specific accuracy and counts");
+	    for (int i = 0; i < totalCategories; i++) {
+	        double precision = tp[i] + fp[i] > 0 ? (double)tp[i] / (tp[i] + fp[i]) : 0;
+	        double recall = tp[i] + fn[i] > 0 ? (double)tp[i] / (tp[i] + fn[i]) : 0;
+	        double f1 = precision + recall > 0 ? 2 * (precision * recall) / (precision + recall) : 0;
+	        double accuracy = (double)(tp[i] + tn[i]) / (tp[i] + tn[i] + fp[i] + fn[i]);
+
+	        Console.WriteLine($"{toxicityLabels[i]}:");
+	        Console.WriteLine($"  Accuracy: {accuracy:P2}");
+	        Console.WriteLine($"  Precision: {precision:P2}, Recall: {recall:P2}, F1 Score: {f1:P2}");
+	        Console.WriteLine($"  (Counts: TP {tp[i], -4} TN {tn[i], -4} FP: {fp[i], -4} FN: {fn[i], -4})\n");
+	    }
+	}
+
+	
+	
+	
+	
+	
+	
+	private static string CleanMessage(string input) {
+		if (string.IsNullOrWhiteSpace(input))
+			return string.Empty;
+
+		input = input.ToLowerInvariant();
+		input = Regex.Replace(input, @"[,:.?!]", " ");
+		input = Regex.Replace(input, @"[^a-z\s]", "");
+		input = Regex.Replace(input, @"\s+", " ");
+		input = input.Trim();
+
+		return input;
+	}
+	public static string CleanCategory(string input) {
+		if (string.IsNullOrWhiteSpace(input)) return string.Empty;
+
+		string cleaned = input.Replace("_", " ").ToLower();
+
+		return char.ToUpper(cleaned[0]) + cleaned.Substring(1);
 	}
 }
