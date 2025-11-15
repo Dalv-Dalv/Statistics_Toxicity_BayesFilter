@@ -12,9 +12,9 @@ Console.WriteLine("Press 1 to enable Debug mode for tests (Enter --> Skip):");
 query = Console.ReadLine();
 bool globalUseDebug = !string.IsNullOrEmpty(query) && int.Parse(query) == 1;
 
-var model = new ToxicityBayesModel(@"games_esential_only.csv", useBigrams, trainPercentage:0.5);
+var model = new ToxicityBayesModel(@"train.csv", useBigrams, trainPercentage:0.5);
 Console.WriteLine();
-model.RunTestDataset(@"games_esential_only.csv", globalUseDebug, testPercentage: 0.5);
+model.RunTestDataset(@"train.csv", globalUseDebug, testPercentage: 0.5);
 
 
 
